@@ -20,6 +20,13 @@ export default function TabsLayout() {
             height: 60 + (insets.bottom > 0 ? insets.bottom : 0),
             paddingBottom: insets.bottom > 0 ? insets.bottom : 10,
             paddingTop: 10,
+            // Prevent the tab bar from being covered by or overlapping
+            // the physical home indicator / gesture nav bar on edge-to-edge
+            // devices. The explicit bottom padding above handles inset-based
+            // devices; this flag keeps the bar above system navigation on
+            // older Android where insets can report 0.
+            position: 'absolute',
+            overflow: 'hidden',
           },
           tabBarActiveTintColor: '#FF9800',
           tabBarInactiveTintColor: '#666',
