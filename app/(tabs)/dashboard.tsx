@@ -157,9 +157,19 @@ export default function Dashboard() {
       for (const r of [walletRes, minersRes, walletStatusRes, adStatsRes]) {
         if (checkExploitResponse(r)) return;
       }
-      if (walletRes.ok) setWalletData(walletRes.data);
-      if (minersRes.ok) {
-        const loadedMiners = minersRes.data.miners || [];
+      if (walletRes.ok && walletRes.data && typeof walletRes.data === 'object') {
+        const wd = walletRes.data;
+        setWalletData({
+          total_balance: typeof wd.total_balance === 'number' ? wd.total_balance : 0,
+          today_earnings: typeof wd.today_earnings === 'number' ? wd.today_earnings : 0,
+          total_miners: typeof wd.total_miners === 'number' ? wd.total_miners : 0,
+          active_miners: typeof wd.active_miners === 'number' ? wd.active_miners : 0,
+          current_hash_rate: typeof wd.current_hash_rate === 'number' ? wd.current_hash_rate : 0,
+          total_referral_rewards: typeof wd.total_referral_rewards === 'number' ? wd.total_referral_rewards : 0,
+        });
+      }
+      if (minersRes.ok && minersRes.data) {
+        const loadedMiners = Array.isArray(minersRes.data.miners) ? minersRes.data.miners : [];
         if (!initialDataLoaded.current) {
           const now = Date.now();
           for (const m of loadedMiners) {
@@ -173,8 +183,8 @@ export default function Dashboard() {
         }
         setMiners(loadedMiners);
       }
-      if (walletStatusRes.ok) setWalletStatus(walletStatusRes.data);
-      if (adStatsRes.ok) setAdStats(adStatsRes.data);
+      if (walletStatusRes.ok && walletStatusRes.data) setWalletStatus(walletStatusRes.data);
+      if (adStatsRes.ok && adStatsRes.data) setAdStats(adStatsRes.data);
     } catch (error) {
       console.error('Error loading data:', error);
     } finally {
@@ -186,7 +196,7 @@ export default function Dashboard() {
   const loadBitcoinPrice = async () => {
     try {
       const res = await apiFetch('/api/bitcoin/price');
-      if (res.ok && res.data.price) {
+      if (res.ok && res.data && typeof res.data.price === 'number') {
         setBitcoinPrice(res.data.price);
         return;
       }
@@ -678,7 +688,7 @@ export default function Dashboard() {
           <Text style={styles.cardTitle}>Mining Status</Text>
           <View style={styles.hashRateContainer}>
             <Text style={styles.hashRateLabel}>Current Hash Rate</Text>
-            <Text style={styles.hashRate}>{walletData?.current_hash_rate.toFixed(1) || '0.0'} GH/s</Text>
+            <Text style={styles.hashRate}>{(walletData?.current_hash_rate ?? 0).toFixed(1)} GH/s</Text>
             {(walletData?.current_hash_rate || 0) > 0 && <View style={styles.miningIndicator} />}
           </View>
         </View>
@@ -786,10 +796,10 @@ export default function Dashboard() {
         )}
 
         {/* Referral Rewards */}
-        {walletData && walletData.total_referral_rewards > 0 && (
+        {walletData && (walletData.total_referral_rewards ?? 0) > 0 && (
           <View style={styles.referralCard}>
             <Text style={styles.cardTitle}>Referral Rewards</Text>
-            <Text style={styles.referralRewards}>{walletData.total_referral_rewards.toFixed(1)} GH/s</Text>
+            <Text style={styles.referralRewards}>{(walletData.total_referral_rewards ?? 0).toFixed(1)} GH/s</Text>
             <Text style={styles.referralSubtitle}>Total from referrals</Text>
           </View>
         )}

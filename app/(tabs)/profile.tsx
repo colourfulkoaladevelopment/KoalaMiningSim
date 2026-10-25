@@ -47,9 +47,20 @@ export default function Profile() {
   const loadUserProfile = async () => {
     try {
       const res = await apiFetch('/api/auth/me');
-      if (res.ok) {
-        setUserProfile(res.data);
-      } else {
+      if (res.ok && res.data && typeof res.data === 'object' && res.data.id) {
+        const d = res.data;
+        setUserProfile({
+          id: d.id ?? '',
+          name: d.name ?? '',
+          email: d.email ?? '',
+          referral_code: d.referral_code ?? '',
+          bitcoin_balance: typeof d.bitcoin_balance === 'number' ? d.bitcoin_balance : 0,
+          total_earnings: typeof d.total_earnings === 'number' ? d.total_earnings : 0,
+          total_referral_rewards: typeof d.total_referral_rewards === 'number' ? d.total_referral_rewards : 0,
+          created_at: d.created_at ?? '',
+          avatar_url: d.avatar_url ?? undefined,
+        });
+      } else if (res.status === 401 || res.status === 403) {
         await clearSession();
         router.replace('/auth');
       }

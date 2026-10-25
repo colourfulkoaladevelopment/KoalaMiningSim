@@ -54,6 +54,27 @@ export default function RootLayout() {
           token = null;
         }
 
+        // Validate user_data is parseable and has the expected shape.
+        // If it's corrupted or missing required fields, purge all stored
+        // auth tokens so the app falls back to the login screen instead of
+        // crash-looping on bad data.
+        try {
+          const rawUserData = await withTimeout(
+            AsyncStorage.getItem('user_data'),
+            3000
+          );
+          if (rawUserData) {
+            const parsed = JSON.parse(rawUserData);
+            if (!parsed || typeof parsed !== 'object' || !parsed.id || !parsed.email) {
+              await AsyncStorage.multiRemove(['session_token', 'user_data']);
+              token = null;
+            }
+          }
+        } catch {
+          await AsyncStorage.multiRemove(['session_token', 'user_data']);
+          token = null;
+        }
+
         if (!token || !mounted) {
           if (mounted) setAuthState('unauthenticated');
           return;
