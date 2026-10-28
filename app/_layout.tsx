@@ -8,6 +8,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import AuthScreen from './auth';
 import { BannedScreen } from '../components/BannedScreen';
 import { apiFetch, clearSession } from '../utils/api';
+import { useFrameworkReady } from '../hooks/useFrameworkReady';
 
 try {
   SplashScreen.preventAutoHideAsync();
@@ -26,6 +27,7 @@ const withTimeout = <T,>(promise: Promise<T>, ms: number): Promise<T> =>
   ]);
 
 export default function RootLayout() {
+  useFrameworkReady();
   const [authState, setAuthState] = useState<AuthState>('loading');
 
   useEffect(() => {
