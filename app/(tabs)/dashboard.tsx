@@ -14,19 +14,22 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as Device from 'expo-device';
+import { Platform } from 'react-native';
 import * as Notifications from 'expo-notifications';
 import { apiFetch, clearSession } from '../../utils/api';
 import { initializeAdMob, showRewardedVideoAd, showInterstitialAd } from '../../utils/adMobAds';
 import { ExploitModal } from '../../components/ExploitModal';
 
-Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowBanner: true,
-    shouldShowList: true,
-    shouldPlaySound: true,
-    shouldSetBadge: false,
-  }),
-});
+if (Platform.OS !== 'web') {
+  Notifications.setNotificationHandler({
+    handleNotification: async () => ({
+      shouldShowBanner: true,
+      shouldShowList: true,
+      shouldPlaySound: true,
+      shouldSetBadge: false,
+    }),
+  });
+}
 
 interface WalletData {
   total_balance: number;
@@ -117,7 +120,9 @@ export default function Dashboard() {
   useEffect(() => {
     initializeAdMob();
     loadData();
-    setupNotifications();
+    if (Platform.OS !== 'web') {
+      setupNotifications();
+    }
     loadBitcoinPrice();
     loadActivityFeed();
 
@@ -229,6 +234,7 @@ export default function Dashboard() {
   };
 
   const setupNotifications = async () => {
+    if (Platform.OS === 'web') return;
     try {
       const token = await registerForPushNotifications();
       if (token) {
@@ -253,7 +259,7 @@ export default function Dashboard() {
   };
 
   const registerForPushNotifications = async () => {
-    if (!Device.isDevice) return null;
+    if (Platform.OS === 'web' || !Device.isDevice) return null;
     const { status: existingStatus } = await Notifications.getPermissionsAsync();
     let finalStatus = existingStatus;
     if (existingStatus !== 'granted') {
@@ -578,14 +584,16 @@ export default function Dashboard() {
         !notifiedExpirations.current.has(miner.id)
       ) {
         notifiedExpirations.current.add(miner.id);
-        Notifications.scheduleNotificationAsync({
-          content: {
-            title: 'Miner Expired!',
-            body: 'Your mining module has completed its cycle. Reactivate your rigs to keep earning Bitcoin!',
-            data: { type: 'miner_expired', miner_id: miner.id },
-          },
-          trigger: null,
-        });
+        if (Platform.OS !== 'web') {
+          Notifications.scheduleNotificationAsync({
+            content: {
+              title: 'Miner Expired!',
+              body: 'Your mining module has completed its cycle. Reactivate your rigs to keep earning Bitcoin!',
+              data: { type: 'miner_expired', miner_id: miner.id },
+            },
+            trigger: null,
+          });
+        }
       }
       prevMinerStatus.current.set(miner.id, miner.status);
     }
