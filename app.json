@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "Koala Mining",
-    "slug": "koala-mining",
+    "slug": "koala-mining-sim",
     "version": "1.1.2",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
