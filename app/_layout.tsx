@@ -6,9 +6,6 @@ import * as SplashScreen from 'expo-splash-screen';
 import * as Font from 'expo-font';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import AuthScreen from './auth';
-import { BannedScreen } from '../components/BannedScreen';
-import { apiFetch, clearSession } from '../utils/api';
-import { useFrameworkReady } from '../hooks/useFrameworkReady';
 
 try {
   SplashScreen.preventAutoHideAsync();
@@ -16,7 +13,7 @@ try {
   // Splash screen may already be prevented or unavailable
 }
 
-type AuthState = 'loading' | 'unauthenticated' | 'authenticated' | 'banned';
+type AuthState = 'loading' | 'unauthenticated' | 'authenticated';
 
 const withTimeout = <T,>(promise: Promise<T>, ms: number): Promise<T> =>
   Promise.race([
@@ -27,7 +24,6 @@ const withTimeout = <T,>(promise: Promise<T>, ms: number): Promise<T> =>
   ]);
 
 export default function RootLayout() {
-  useFrameworkReady();
   const [authState, setAuthState] = useState<AuthState>('loading');
 
   useEffect(() => {
@@ -56,53 +52,8 @@ export default function RootLayout() {
           token = null;
         }
 
-        // Validate user_data is parseable and has the expected shape.
-        // If it's corrupted or missing required fields, purge all stored
-        // auth tokens so the app falls back to the login screen instead of
-        // crash-looping on bad data.
-        try {
-          const rawUserData = await withTimeout(
-            AsyncStorage.getItem('user_data'),
-            3000
-          );
-          if (rawUserData) {
-            const parsed = JSON.parse(rawUserData);
-            if (!parsed || typeof parsed !== 'object' || !parsed.id || !parsed.email) {
-              await AsyncStorage.multiRemove(['session_token', 'user_data']);
-              token = null;
-            }
-          }
-        } catch {
-          await AsyncStorage.multiRemove(['session_token', 'user_data']);
-          token = null;
-        }
-
-        if (!token || !mounted) {
-          if (mounted) setAuthState('unauthenticated');
-          return;
-        }
-
-        // Verify the session is still valid and the account is not banned
-        try {
-          const res = await apiFetch('/api/auth/me');
-          if (res.status === 403 && res.data?.banned) {
-            await clearSession();
-            if (mounted) setAuthState('banned');
-            return;
-          }
-          if (res.ok && res.data?.account_status === 'Banned') {
-            await clearSession();
-            if (mounted) setAuthState('banned');
-            return;
-          }
-          if (!res.ok) {
-            await clearSession();
-            if (mounted) setAuthState('unauthenticated');
-            return;
-          }
-          if (mounted) setAuthState('authenticated');
-        } catch {
-          if (mounted) setAuthState('authenticated');
+        if (mounted) {
+          setAuthState(token ? 'authenticated' : 'unauthenticated');
         }
       } catch {
         if (mounted) {
@@ -131,14 +82,6 @@ export default function RootLayout() {
         <View style={styles.loadingContainer}>
           <ActivityIndicator size="large" color="#FF9800" />
         </View>
-      </SafeAreaProvider>
-    );
-  }
-
-  if (authState === 'banned') {
-    return (
-      <SafeAreaProvider>
-        <BannedScreen />
       </SafeAreaProvider>
     );
   }

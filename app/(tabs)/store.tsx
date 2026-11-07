@@ -29,10 +29,19 @@ interface UserBalance {
   total_balance: number;
 }
 
+interface Miner {
+  id: string;
+  name: string;
+  hash_rate: number;
+  status: string;
+  time_remaining: number;
+  expires_at?: string;
+}
 
 export default function Store() {
   const [storeMiners, setStoreMiners] = useState<StoreMiner[]>([]);
   const [userBalance, setUserBalance] = useState<UserBalance | null>(null);
+  const [userMiners, setUserMiners] = useState<Miner[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [purchasingMiner, setPurchasingMiner] = useState<string | null>(null);
@@ -51,7 +60,6 @@ export default function Store() {
     return () => {
       subscription.remove();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const loadData = async () => {
@@ -64,7 +72,7 @@ export default function Store() {
 
       if (storeRes.ok) setStoreMiners(storeRes.data.miners || []);
       if (balanceRes.ok) setUserBalance({ total_balance: balanceRes.data.total_balance });
-      if (minersRes.ok) { /* miners state not needed in store UI */ }
+      if (minersRes.ok) setUserMiners(minersRes.data.miners || []);
     } catch (error) {
       console.error('Error loading store data:', error);
     } finally {
@@ -83,7 +91,7 @@ export default function Store() {
     if (!pending) return;
 
     try {
-      const res = await apiFetch('/api/payments/paypal/capture-order', {
+      const res = await apiFetch('/api/payments/capture-paypal-order', {
         method: 'POST',
         body: JSON.stringify({ order_id: pending.orderId }),
       });
@@ -119,40 +127,36 @@ export default function Store() {
   };
 
   const initiatePayPalPurchase = async (miner: StoreMiner) => {
-    const tierName = getTierName(miner.hash_rate);
     try {
       setPurchasingMiner(miner.id);
-      const res = await apiFetch('/api/payments/paypal/create-order', {
+      const res = await apiFetch('/api/payments/create-paypal-order', {
         method: 'POST',
-        body: JSON.stringify({
-          miner_id: miner.id,
-          tier: tierName,
-          price: miner.price,
-        }),
+        body: JSON.stringify({ miner_id: miner.id }),
       });
 
-      if (res.ok && res.data.order_id) {
-        const approvalUrl = res.data.links?.find((l: { rel: string; href: string }) => l.rel === 'approve')?.href
-          || res.data.approval_url;
-        if (!approvalUrl) {
-          Alert.alert('Checkout Error', 'PayPal did not return an approval URL. Please try again.');
-          return;
-        }
+      if (res.ok && res.data.approval_url) {
         paypalPendingRef.current = { orderId: res.data.order_id, minerId: miner.id };
-        await Linking.openURL(approvalUrl);
+        await Linking.openURL(res.data.approval_url);
       } else {
-        const detail = res.data?.detail || res.data?.message || 'The server could not start the PayPal checkout. Please try again.';
-        Alert.alert('Checkout Error', detail);
+        Alert.alert('Error', res.data?.detail || 'Failed to create PayPal order');
       }
-    } catch (error: any) {
-      const msg = error?.message || 'Unable to reach the payment server. Check your connection and try again.';
-      Alert.alert('Checkout Error', msg);
+    } catch (error) {
+      Alert.alert('Error', 'Network error occurred');
     } finally {
       setPurchasingMiner(null);
     }
   };
 
-  const getMinerIcon = (hashRate: number): React.ComponentProps<typeof Ionicons>['name'] => {
+  const renewMiner = (miner: Miner) => {
+    const storeMiner = storeMiners.find(sm => sm.name === miner.name || sm.hash_rate === miner.hash_rate);
+    if (storeMiner) {
+      purchaseMiner(storeMiner);
+    } else {
+      Alert.alert('Info', 'This miner is no longer available in the store.');
+    }
+  };
+
+  const getMinerIcon = (hashRate: number): string => {
     if (hashRate >= 20000) return 'diamond';
     if (hashRate >= 15000) return 'star';
     if (hashRate >= 10000) return 'trophy';

@@ -14,22 +14,18 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as Device from 'expo-device';
-import { Platform } from 'react-native';
 import * as Notifications from 'expo-notifications';
-import { apiFetch, clearSession } from '../../utils/api';
+import { apiFetch } from '../../utils/api';
 import { initializeAdMob, showRewardedVideoAd, showInterstitialAd } from '../../utils/adMobAds';
-import { ExploitModal } from '../../components/ExploitModal';
 
-if (Platform.OS !== 'web') {
-  Notifications.setNotificationHandler({
-    handleNotification: async () => ({
-      shouldShowBanner: true,
-      shouldShowList: true,
-      shouldPlaySound: true,
-      shouldSetBadge: false,
-    }),
-  });
-}
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowBanner: true,
+    shouldShowList: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+  }),
+});
 
 interface WalletData {
   total_balance: number;
@@ -92,27 +88,16 @@ export default function Dashboard() {
   const [showExpiredMiners, setShowExpiredMiners] = useState(false);
   const [isWithdrawing, setIsWithdrawing] = useState(false);
   const [isWatchingAd, setIsWatchingAd] = useState(false);
-  const [adCooldown, setAdCooldown] = useState(0);
-  const [showExploitModal, setShowExploitModal] = useState(false);
-  const [exploitWarningNumber, setExploitWarningNumber] = useState<number | undefined>(undefined);
   const [currentAdType, setCurrentAdType] = useState<string>('');
   const [walletAddress, setWalletAddress] = useState('');
   const [withdrawForm, setWithdrawForm] = useState({ address: '', amount: '', network: 'bitcoin' });
   const [addressChangeForm, setAddressChangeForm] = useState({ currentPassword: '', newAddress: '', confirmAddress: '' });
   const [isSubmittingAddressChange, setIsSubmittingAddressChange] = useState(false);
-  const NETWORK_FEE_SATS = 5;
-  const feePreviewAmount = (() => {
-    const entered = Number.parseInt(withdrawForm.amount, 10);
-    if (!withdrawForm.amount || isNaN(entered) || entered < 1000) return 1000;
-    return entered;
-  })();
-  const feePreviewServiceFee = Math.ceil(feePreviewAmount * 0.01);
-  const feePreviewTotal = feePreviewAmount + feePreviewServiceFee + NETWORK_FEE_SATS;
-  const feeDisclosureText = `The service fee is 1% of the withdrawal amount, and the withdrawal fee is set by the network, both of which are added on top of the withdrawal amount. A ${feePreviewAmount} sat withdrawal will have ${feePreviewServiceFee} sats sent to the fee account and ${NETWORK_FEE_SATS} sats in network fee as determined by the network, making the total needed sats ${feePreviewTotal}.`;
+  const networkFee = 0.00001;
   const [tick, setTick] = useState(0);
   const [satoshiTick, setSatoshiTick] = useState(0);
-  const notificationListener = useRef<any>(undefined);
-  const responseListener = useRef<any>(undefined);
+  const notificationListener = useRef<any>();
+  const responseListener = useRef<any>();
   const notifiedExpirations = useRef<Set<string>>(new Set());
   const prevMinerStatus = useRef<Map<string, string>>(new Map());
   const initialDataLoaded = useRef(false);
@@ -120,9 +105,7 @@ export default function Dashboard() {
   useEffect(() => {
     initializeAdMob();
     loadData();
-    if (Platform.OS !== 'web') {
-      setupNotifications();
-    }
+    setupNotifications();
     loadBitcoinPrice();
     loadActivityFeed();
 
@@ -147,7 +130,6 @@ export default function Dashboard() {
         responseListener.current.remove();
       }
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const loadData = async () => {
@@ -159,22 +141,9 @@ export default function Dashboard() {
         apiFetch('/api/ads/daily-stats', { method: 'POST' }),
       ]);
 
-      for (const r of [walletRes, minersRes, walletStatusRes, adStatsRes]) {
-        if (checkExploitResponse(r)) return;
-      }
-      if (walletRes.ok && walletRes.data && typeof walletRes.data === 'object') {
-        const wd = walletRes.data;
-        setWalletData({
-          total_balance: typeof wd.total_balance === 'number' ? wd.total_balance : 0,
-          today_earnings: typeof wd.today_earnings === 'number' ? wd.today_earnings : 0,
-          total_miners: typeof wd.total_miners === 'number' ? wd.total_miners : 0,
-          active_miners: typeof wd.active_miners === 'number' ? wd.active_miners : 0,
-          current_hash_rate: typeof wd.current_hash_rate === 'number' ? wd.current_hash_rate : 0,
-          total_referral_rewards: typeof wd.total_referral_rewards === 'number' ? wd.total_referral_rewards : 0,
-        });
-      }
-      if (minersRes.ok && minersRes.data) {
-        const loadedMiners = Array.isArray(minersRes.data.miners) ? minersRes.data.miners : [];
+      if (walletRes.ok) setWalletData(walletRes.data);
+      if (minersRes.ok) {
+        const loadedMiners = minersRes.data.miners || [];
         if (!initialDataLoaded.current) {
           const now = Date.now();
           for (const m of loadedMiners) {
@@ -188,8 +157,8 @@ export default function Dashboard() {
         }
         setMiners(loadedMiners);
       }
-      if (walletStatusRes.ok && walletStatusRes.data) setWalletStatus(walletStatusRes.data);
-      if (adStatsRes.ok && adStatsRes.data) setAdStats(adStatsRes.data);
+      if (walletStatusRes.ok) setWalletStatus(walletStatusRes.data);
+      if (adStatsRes.ok) setAdStats(adStatsRes.data);
     } catch (error) {
       console.error('Error loading data:', error);
     } finally {
@@ -201,7 +170,7 @@ export default function Dashboard() {
   const loadBitcoinPrice = async () => {
     try {
       const res = await apiFetch('/api/bitcoin/price');
-      if (res.ok && res.data && typeof res.data.price === 'number') {
+      if (res.ok && res.data.price) {
         setBitcoinPrice(res.data.price);
         return;
       }
@@ -234,7 +203,6 @@ export default function Dashboard() {
   };
 
   const setupNotifications = async () => {
-    if (Platform.OS === 'web') return;
     try {
       const token = await registerForPushNotifications();
       if (token) {
@@ -259,7 +227,7 @@ export default function Dashboard() {
   };
 
   const registerForPushNotifications = async () => {
-    if (Platform.OS === 'web' || !Device.isDevice) return null;
+    if (!Device.isDevice) return null;
     const { status: existingStatus } = await Notifications.getPermissionsAsync();
     let finalStatus = existingStatus;
     if (existingStatus !== 'granted') {
@@ -277,7 +245,7 @@ export default function Dashboard() {
         body: JSON.stringify({
           expo_push_token: token,
           device_type: Device.osName?.toLowerCase() || 'unknown',
-          app_version: '1.1.3',
+          app_version: '1.1.2',
         }),
       });
     } catch (error) {
@@ -302,49 +270,60 @@ export default function Dashboard() {
       } else {
         Alert.alert('Error', res.data?.detail || 'Failed to activate free miner');
       }
-    } catch {
+    } catch (error) {
       Alert.alert('Error', 'Network error occurred');
     } finally {
       setActivatingMiner(null);
     }
   };
 
-  const adCooldownRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  const checkExploitResponse = (res: { ok: boolean; data: any; status: number }): boolean => {
-    if (res.status === 403 && res.data?.banned) {
-      clearSession();
-      setShowExploitModal(false);
-      return true;
-    }
-    if (res.status === 403 && res.data?.exploit_detected) {
-      setExploitWarningNumber(res.data?.warning_number);
-      setShowExploitModal(true);
-      return true;
-    }
-    return false;
-  };
-
   const watchAdForMining = async () => {
-    if (adCooldown > 0) return;
     if (!adStats?.can_watch_ad) {
       Alert.alert('Daily Limit Reached', 'You have watched all available ads for today. Come back tomorrow!');
       return;
     }
-    setAdCooldown(3);
-    if (adCooldownRef.current) clearInterval(adCooldownRef.current);
-    adCooldownRef.current = setInterval(() => {
-      setAdCooldown(prev => {
-        if (prev <= 1) {
-          if (adCooldownRef.current) clearInterval(adCooldownRef.current);
-          adCooldownRef.current = null;
-          return 0;
-        }
-        return prev - 1;
-      });
-    }, 1000);
     setCurrentAdType('miner_activation');
     setShowAdModal(true);
+  };
+
+  const handleAdWatch = async () => {
+    setShowAdModal(false);
+    setIsWatchingAd(true);
+    setActivatingMiner('ad');
+
+    let adResult = { watched: false, rewarded: false };
+    try {
+      adResult = await showRewardedVideoAd();
+    } catch (error: any) {
+      console.error('Ad error:', error);
+      Alert.alert('Ad Error', error?.message || 'Failed to load ad. Please try again.');
+      setIsWatchingAd(false);
+      setActivatingMiner(null);
+      return;
+    }
+    if (!adResult.watched && !adResult.rewarded) {
+      setIsWatchingAd(false);
+      setActivatingMiner(null);
+      return;
+    }
+
+    if (adResult.rewarded) {
+      try {
+        const res = await apiFetch('/api/miners/watch-ad', { method: 'POST' });
+        if (res.ok) {
+          Alert.alert('Success', 'Ad miner boost activated! Duration extended by 30 minutes.');
+          loadData();
+        } else {
+          Alert.alert('Error', res.data?.detail || 'Failed to activate ad miner');
+        }
+      } catch (error) {
+        Alert.alert('Error', 'Network error occurred');
+      }
+    } else if (adResult.watched) {
+      Alert.alert('Ad Skipped', 'You skipped the ad. Watch the full ad to earn the reward.');
+    }
+    setIsWatchingAd(false);
+    setActivatingMiner(null);
   };
 
   const activateMiner = async (minerId: string) => {
@@ -357,7 +336,7 @@ export default function Dashboard() {
       } else {
         Alert.alert('Error', res.data?.detail || 'Failed to activate miner');
       }
-    } catch {
+    } catch (error) {
       Alert.alert('Error', 'Network error occurred');
     } finally {
       setActivatingMiner(null);
@@ -382,7 +361,7 @@ export default function Dashboard() {
       } else {
         Alert.alert('Error', res.data?.detail || 'Failed to register wallet address');
       }
-    } catch {
+    } catch (error) {
       Alert.alert('Error', 'Network error occurred');
     }
   };
@@ -413,10 +392,21 @@ export default function Dashboard() {
       } else {
         Alert.alert('Error', res.data?.detail || 'Failed to request address change');
       }
-    } catch {
+    } catch (error) {
       Alert.alert('Error', 'Network error occurred');
     } finally {
       setIsSubmittingAddressChange(false);
+    }
+  };
+
+  const dismissAddressRejection = async () => {
+    try {
+      const res = await apiFetch('/api/wallet/dismiss-rejection', { method: 'POST' });
+      if (res.ok) {
+        loadData();
+      }
+    } catch (error) {
+      console.error('Error dismissing rejection:', error);
     }
   };
 
@@ -447,6 +437,11 @@ export default function Dashboard() {
     await proceedWithWithdrawal(amount);
   };
 
+  const showForcedAdForWithdraw = async () => {
+    setCurrentAdType('withdrawal');
+    setShowAdModal(true);
+  };
+
   const proceedWithWithdrawal = async (amountSatoshis: number) => {
     setIsWithdrawing(true);
     try {
@@ -465,7 +460,7 @@ export default function Dashboard() {
       } else {
         Alert.alert('Error', res.data?.detail || 'Withdrawal request failed.');
       }
-    } catch {
+    } catch (error) {
       Alert.alert('Error', 'Network error occurred.');
     } finally {
       setIsWithdrawing(false);
@@ -499,17 +494,13 @@ export default function Dashboard() {
       try {
         setActivatingMiner('ad');
         const res = await apiFetch('/api/miners/watch-ad', { method: 'POST' });
-        if (checkExploitResponse(res)) {
-          setActivatingMiner(null);
-          return;
-        }
         if (res.ok) {
           Alert.alert('Success', 'Ad miner activated! 5 GH/s for 24 hours.');
           loadData();
         } else {
           Alert.alert('Error', res.data?.detail || 'Failed to activate ad miner');
         }
-      } catch {
+      } catch (error) {
         Alert.alert('Error', 'Network error occurred');
       } finally {
         setActivatingMiner(null);
@@ -584,16 +575,14 @@ export default function Dashboard() {
         !notifiedExpirations.current.has(miner.id)
       ) {
         notifiedExpirations.current.add(miner.id);
-        if (Platform.OS !== 'web') {
-          Notifications.scheduleNotificationAsync({
-            content: {
-              title: 'Miner Expired!',
-              body: 'Your mining module has completed its cycle. Reactivate your rigs to keep earning Bitcoin!',
-              data: { type: 'miner_expired', miner_id: miner.id },
-            },
-            trigger: null,
-          });
-        }
+        Notifications.scheduleNotificationAsync({
+          content: {
+            title: 'Miner Expired!',
+            body: 'Your mining module has completed its cycle. Reactivate your rigs to keep earning Bitcoin!',
+            data: { type: 'miner_expired', miner_id: miner.id },
+          },
+          trigger: null,
+        });
       }
       prevMinerStatus.current.set(miner.id, miner.status);
     }
@@ -696,7 +685,7 @@ export default function Dashboard() {
           <Text style={styles.cardTitle}>Mining Status</Text>
           <View style={styles.hashRateContainer}>
             <Text style={styles.hashRateLabel}>Current Hash Rate</Text>
-            <Text style={styles.hashRate}>{(walletData?.current_hash_rate ?? 0).toFixed(1)} GH/s</Text>
+            <Text style={styles.hashRate}>{walletData?.current_hash_rate.toFixed(1) || '0.0'} GH/s</Text>
             {(walletData?.current_hash_rate || 0) > 0 && <View style={styles.miningIndicator} />}
           </View>
         </View>
@@ -725,7 +714,7 @@ export default function Dashboard() {
           <TouchableOpacity
             style={[styles.quickActionButton, styles.adButton]}
             onPress={watchAdForMining}
-            disabled={activatingMiner === 'ad' || isWatchingAd || adCooldown > 0}
+            disabled={activatingMiner === 'ad' || isWatchingAd}
           >
             <View style={styles.actionButtonContent}>
               <Ionicons name="play-circle" size={24} color="#FF5722" />
@@ -733,15 +722,11 @@ export default function Dashboard() {
                 <Text style={styles.actionButtonTitle}>Watch Ad for Boost</Text>
                 <Text style={styles.adBoostCapacity}>5 GH/s (for 24 hours)</Text>
                 <Text style={styles.actionButtonSubtitle}>
-                  {adCooldown > 0
-                    ? `Please wait... ${adCooldown}s`
-                    : adStats ? `${adStats.remaining_ads}/${adStats.max_daily_ads} ads remaining today` : 'Ads available daily'}
+                  {adStats ? `${adStats.remaining_ads}/${adStats.max_daily_ads} ads remaining today` : 'Ads available daily'}
                 </Text>
               </View>
               {activatingMiner === 'ad' || isWatchingAd ? (
                 <ActivityIndicator size="small" color="#FF5722" />
-              ) : adCooldown > 0 ? (
-                <Ionicons name="time" size={20} color="#FF5722" />
               ) : (
                 <Ionicons name="chevron-forward" size={20} color="#FF5722" />
               )}
@@ -804,10 +789,10 @@ export default function Dashboard() {
         )}
 
         {/* Referral Rewards */}
-        {walletData && (walletData.total_referral_rewards ?? 0) > 0 && (
+        {walletData && walletData.total_referral_rewards > 0 && (
           <View style={styles.referralCard}>
             <Text style={styles.cardTitle}>Referral Rewards</Text>
-            <Text style={styles.referralRewards}>{(walletData.total_referral_rewards ?? 0).toFixed(1)} GH/s</Text>
+            <Text style={styles.referralRewards}>{walletData.total_referral_rewards.toFixed(1)} GH/s</Text>
             <Text style={styles.referralSubtitle}>Total from referrals</Text>
           </View>
         )}
@@ -837,7 +822,7 @@ export default function Dashboard() {
               keyboardType="number-pad"
             />
             <Text style={styles.feeDisclosure}>
-              {feeDisclosureText}
+              Transaction fee: {Math.ceil(networkFee * 100_000_000).toLocaleString()} Satoshis added on top of your withdrawal amount.
             </Text>
             <Text style={styles.feeInfo}>Available: {availableSatoshis.toLocaleString()} Satoshis</Text>
             <View style={styles.modalButtons}>
@@ -941,12 +926,6 @@ export default function Dashboard() {
           </View>
         </View>
       </Modal>
-
-      <ExploitModal
-        visible={showExploitModal}
-        warningNumber={exploitWarningNumber}
-        onClose={() => setShowExploitModal(false)}
-      />
     </SafeAreaView>
   );
 }

@@ -11,7 +11,7 @@ export default function PaypalSuccess() {
     (async () => {
       try {
         await AsyncStorage.setItem('paypal_payment_result', 'success');
-      } catch {}
+      } catch (e) {}
       router.replace('/');
     })();
   }, []);

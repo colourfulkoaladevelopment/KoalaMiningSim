@@ -15,7 +15,6 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Device from 'expo-device';
 import { BACKEND_URL } from '../utils/api';
-import { router } from 'expo-router';
 
 import ResetPasswordScreen from './reset-password';
 

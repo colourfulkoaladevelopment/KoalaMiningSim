@@ -4,7 +4,6 @@ from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field, validator
 from pymongo import MongoClient, UpdateOne, ReturnDocument
-from pymongo.errors import DuplicateKeyError
 from bson import ObjectId
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any
@@ -72,9 +71,9 @@ BITCOIN_RPC_URL = os.getenv("BITCOIN_RPC_URL", "http://localhost:8332")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# MongoDB connection — explicit connection pool of 100 reused across all background tasks
+# MongoDB connection
 MONGO_URL = os.getenv("MONGO_URL", "mongodb://localhost:27017")
-client = MongoClient(MONGO_URL, maxPoolSize=100)
+client = MongoClient(MONGO_URL)
 db = client[os.getenv("DB_NAME", "bitcoin_mining_db")]
 
 # Collections
@@ -86,28 +85,6 @@ mining_sessions_collection = db.mining_sessions
 devices_collection = db.devices
 referrals_collection = db.referrals
 purchases_collection = db.purchases
-
-# Uniqueness constraints. The application checks these with a read followed by
-# a write, which two concurrent requests can both pass, so the database has to
-# be the thing that actually enforces them.
-def _ensure_indexes():
-    specs = [
-        (users_collection, [("email", 1)], {"unique": True, "name": "uniq_email"}),
-        (users_collection, [("referral_code", 1)], {"unique": True, "name": "uniq_referral_code"}),
-        (users_collection, [("btc_wallet_address", 1)],
-         {"unique": True, "sparse": True, "name": "uniq_btc_wallet_address"}),
-        (db.daily_ad_counters, [("user_id", 1), ("date", 1)],
-         {"unique": True, "name": "uniq_user_date"}),
-    ]
-    for collection, keys, opts in specs:
-        try:
-            collection.create_index(keys, **opts)
-        except Exception as exc:
-            # Pre-existing duplicate rows will block index creation. Log it so
-            # the duplicates can be cleaned up; never take the service down.
-            logging.getLogger(__name__).error(
-                "Could not create index %s: %s", opts.get("name"), exc
-            )
 
 # Security setup
 SECRET_KEY = os.environ["JWT_SECRET_KEY"]
@@ -353,118 +330,6 @@ def create_access_token(data: Dict[str, Any]) -> str:
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-def send_ban_notification_email(user_email: str):
-    """Send the official account deactivation notification email when a user is banned."""
-    try:
-        import smtplib
-        import traceback
-        from email.mime.text import MIMEText
-        from email.mime.multipart import MIMEMultipart
-
-        smtp_server = os.getenv("SMTP_HOST", "smtp.gmail.com")
-        smtp_port = int(os.getenv("SMTP_PORT", "587"))
-        sender_email = os.getenv("SMTP_EMAIL", "koalabtcmining@gmail.com")
-        sender_password = os.getenv("SMTP_PASSWORD", "")
-
-        safe_email = html.escape(user_email)
-
-        msg = MIMEMultipart()
-        msg['From'] = sender_email
-        msg['To'] = user_email
-        msg['Subject'] = "Koala Mining Account Deactivated"
-
-        email_body = f"""
-        <html>
-        <body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-            <div style="background: linear-gradient(135deg, #1a1a1a 0%, #000000 100%); padding: 30px; text-align: center;">
-                <h1 style="color: #FF5722; margin: 0;">Koala Mining</h1>
-                <h2 style="color: #FFF; margin: 10px 0;">Account Permanently Deactivated</h2>
-            </div>
-            <div style="padding: 30px; background: #f8f9fa;">
-                <p style="font-size: 16px; color: #333;">Dear {safe_email},</p>
-                <p style="font-size: 16px; color: #333;">
-                    Your Koala Mining account has been permanently deactivated due to repeated attempts to exploit system mechanics.
-                    In accordance with our Terms of Service, your current mining rigs and accrued balance have been frozen.
-                </p>
-                <p style="font-size: 16px; color: #333;">
-                    If you believe this enforcement action was taken in error, you may file a formal administrative appeal
-                    by reaching out to
-                    <a href="mailto:koalabtcmining@gmail.com" style="color: #FF9800; font-weight: bold;">koalabtcmining@gmail.com</a>.
-                </p>
-            </div>
-            <div style="background: #333; padding: 20px; text-align: center;">
-                <p style="color: #AAA; font-size: 12px; margin: 0;">
-                    Koala Mining Automated Enforcement System<br>
-                    This is an automated message. Do not reply directly.
-                </p>
-            </div>
-        </body>
-        </html>
-        """
-
-        msg.attach(MIMEText(email_body, 'html'))
-
-        server = None
-        try:
-            if smtp_port == 465:
-                server = smtplib.SMTP_SSL(smtp_server, smtp_port, timeout=10)
-            else:
-                server = smtplib.SMTP(smtp_server, smtp_port, timeout=10)
-                server.ehlo()
-                server.starttls()
-                server.ehlo()
-            if sender_password:
-                server.login(sender_email, sender_password)
-            text = msg.as_string()
-            server.sendmail(sender_email, user_email, text)
-            logger.info(f"Ban notification email sent to {user_email}")
-        finally:
-            if server is not None:
-                try:
-                    server.quit()
-                except Exception:
-                    pass
-    except Exception as e:
-        logger.error(f"Failed to send ban notification email to {user_email}: {e}")
-
-def record_exploit_warning(user_id: str) -> Dict[str, Any]:
-    """Increment warning_count on the user. If >= 3, ban the account and
-    send the deactivation email. Returns dict with warning info and a
-    'banned' boolean."""
-    result = users_collection.find_one_and_update(
-        {"_id": user_id},
-        {"$inc": {"warning_count": 1}},
-        return_document=ReturnDocument.AFTER,
-    )
-    if not result:
-        return {"warning_count": 0, "banned": False}
-
-    warning_count = result.get("warning_count", 0)
-    is_banned = warning_count >= 3
-
-    if is_banned and result.get("account_status") != "Banned":
-        users_collection.update_one(
-            {"_id": user_id},
-            {"$set": {"is_active": False, "account_status": "Banned"}},
-        )
-        # Kill all active sessions so the token stops working immediately
-        user_sessions_collection.delete_many({"user_id": str(result.get("_id", user_id))})
-        send_ban_notification_email(result.get("email", ""))
-
-    return {"warning_count": warning_count, "banned": is_banned}
-
-def check_banned(user: Dict) -> None:
-    """Raise HTTP 403 with a banned payload if the user's account is banned."""
-    if not user.get("is_active", True) or user.get("account_status") == "Banned":
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "banned": True,
-                "message": "Your account has been permanently deactivated. Contact koalabtcmining@gmail.com to file an appeal.",
-                "account_status": "Banned",
-            },
-        )
-
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> Dict[str, Any]:
     """Get current authenticated user"""
     token = credentials.credentials
@@ -486,19 +351,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         user = users_collection.find_one({"_id": session["user_id"]})
         if not user:
             raise HTTPException(status_code=401, detail="User not found")
-
-        # Banned accounts cannot use any API endpoint
-        if not user.get("is_active", True) or user.get("account_status") == "Banned":
-            user_sessions_collection.delete_one({"session_token": token})
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "banned": True,
-                    "message": "Your account has been permanently deactivated. Contact koalabtcmining@gmail.com to file an appeal.",
-                    "account_status": "Banned",
-                },
-            )
-
+        
         user["id"] = str(user["_id"])
         return user
         
@@ -644,7 +497,6 @@ async def process_mining_earnings():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    _ensure_indexes()
     scheduler.start()
     
     # Schedule background tasks to run every 10 minutes to avoid flooding
@@ -720,22 +572,10 @@ async def register(request: RegisterRequest):
         "total_cashed_out": 0.0,  # Track total withdrawals
         "role": "user",
         "device_fingerprint": request.device_fingerprint,
-        "warning_count": 0,
-        "is_active": True,
-        "account_status": "Active",
         "created_at": datetime.utcnow()
     }
     
-    try:
-        users_collection.insert_one(user_data)
-    except DuplicateKeyError:
-        # The unique index caught a registration that raced past the check
-        # above. Answer exactly as the "already exists" branch does, so the
-        # form still cannot be used to test which addresses have an account.
-        raise HTTPException(
-            status_code=400,
-            detail="We couldn't complete registration with those details. If you already have an account, try signing in or resetting your password.",
-        )
+    users_collection.insert_one(user_data)
     
     # Handle referral if provided (only link + reward when the code is valid)
     if request.referral_code:
@@ -744,23 +584,9 @@ async def register(request: RegisterRequest):
             # Anti-fraud: block self-referral on same device
             if request.device_fingerprint and referrer.get("device_fingerprint") == request.device_fingerprint:
                 users_collection.update_one({"_id": user_id}, {"$set": {"referred_by": None}})
-                warning_info = record_exploit_warning(user_id)
-                if warning_info["banned"]:
-                    raise HTTPException(
-                        status_code=403,
-                        detail={
-                            "banned": True,
-                            "message": "Your account has been permanently deactivated. Contact koalabtcmining@gmail.com to file an appeal.",
-                            "account_status": "Banned",
-                        },
-                    )
                 raise HTTPException(
-                    status_code=403,
-                    detail={
-                        "exploit_detected": True,
-                        "warning_number": warning_info["warning_count"],
-                        "message": "Exploit attempt detected. Repeated violations will result in total account deactivation.",
-                    },
+                    status_code=400,
+                    detail="Referral code invalid: Identical device signature detected."
                 )
             grant_referral_rewards(str(referrer["_id"]), user_id)
         else:
@@ -796,17 +622,6 @@ async def login(request: LoginRequest):
     user = users_collection.find_one({"email": request.email.strip().lower()})
     if not user or not verify_password(request.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-
-    # Banned accounts cannot log in
-    if not user.get("is_active", True) or user.get("account_status") == "Banned":
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "banned": True,
-                "message": "Your account has been permanently deactivated. Contact koalabtcmining@gmail.com to file an appeal.",
-                "account_status": "Banned",
-            },
-        )
     
     # Create session
     session_token = create_access_token({"sub": str(user["_id"])})
@@ -858,10 +673,7 @@ async def get_current_user_info(current_user: Dict = Depends(get_current_user)):
         "total_referral_rewards": current_user.get("total_referral_rewards", 0.0),
         "total_cashed_out": current_user.get("total_cashed_out", 0.0),
         "avatar": current_user.get("avatar"),  # Include avatar
-        "created_at": current_user["created_at"],
-        "is_active": current_user.get("is_active", True),
-        "account_status": current_user.get("account_status", "Active"),
-        "warning_count": current_user.get("warning_count", 0),
+        "created_at": current_user["created_at"]
     }
 
 @app.post("/api/auth/logout")
@@ -885,38 +697,13 @@ async def update_avatar(
         if not avatar_base64:
             raise HTTPException(status_code=400, detail="Avatar data is required")
         
-        if not isinstance(avatar_base64, str):
+        # Basic validation: check if it's a data URL or just base64
+        if not avatar_base64.startswith('data:image'):
             raise HTTPException(status_code=400, detail="Invalid image format. Must be a data URL")
-
-        # Check size BEFORE doing anything else with the payload, so an
-        # oversized upload is rejected rather than inspected and stored.
-        # (base64 is ~1.37x the original, so 2MB of image is ~2.74MB encoded.)
+        
+        # Check size (rough estimate: base64 is ~1.37x original size, so 2MB = ~2.74MB base64)
         if len(avatar_base64) > 3000000:  # ~2.2MB in base64
             raise HTTPException(status_code=400, detail="Image too large. Maximum size is 2MB")
-
-        # Only accept concrete raster image types. A bare "data:image" prefix
-        # test also matches data:image/svg+xml, and SVG is markup that can
-        # carry script wherever the avatar is rendered in a browser context.
-        ALLOWED_AVATAR_PREFIXES = (
-            "data:image/png;base64,",
-            "data:image/jpeg;base64,",
-            "data:image/jpg;base64,",
-            "data:image/webp;base64,",
-            "data:image/gif;base64,",
-        )
-        if not avatar_base64.startswith(ALLOWED_AVATAR_PREFIXES):
-            raise HTTPException(
-                status_code=400,
-                detail="Unsupported image format. Please use a PNG, JPEG, WebP or GIF image."
-            )
-
-        # The remainder must be valid base64 and nothing else.
-        import base64 as _b64
-        _prefix, _, _payload = avatar_base64.partition(",")
-        try:
-            _b64.b64decode(_payload, validate=True)
-        except Exception:
-            raise HTTPException(status_code=400, detail="Invalid image data.")
         
         # Update user avatar
         users_collection.update_one(
@@ -1215,17 +1002,7 @@ async def activate_miner(miner_id: str, current_user: Dict = Depends(get_current
     
     if miner["status"] == "active":
         raise HTTPException(status_code=400, detail="Miner is already active")
-
-    # A miner may only be started from the "inactive" state it is created in.
-    # Without this, a miner that has already run its full term comes back as
-    # "expired" and this route would hand it a brand new lifetime, letting a
-    # single purchase be replayed for unlimited mining time.
-    if miner["status"] != "inactive":
-        raise HTTPException(
-            status_code=400,
-            detail="This miner has already completed its rental period and cannot be reactivated."
-        )
-
+    
     # Activate miner
     now = datetime.utcnow()
     expires_at = now + timedelta(hours=miner["duration_hours"])
@@ -1253,17 +1030,8 @@ async def activate_free_miner(current_user: Dict = Depends(get_current_user)):
         "created_at": {"$gte": today_start}
     })
     
-    # The free miner is a once-per-day entitlement. Its mere existence for
-    # today means it has already been claimed, whatever state it is now in.
-    # Testing only for "active" would let a user re-claim it every time the
-    # previous one lapsed, repeating all day.
-    if existing_free:
-        if existing_free["status"] == "active":
-            raise HTTPException(status_code=400, detail="Free miner already active today")
-        raise HTTPException(
-            status_code=400,
-            detail="You have already claimed your free miner today. A new one is available tomorrow."
-        )
+    if existing_free and existing_free["status"] == "active":
+        raise HTTPException(status_code=400, detail="Free miner already active today")
     
     # Create or reactivate free miner
     now = datetime.utcnow()
@@ -1308,40 +1076,6 @@ async def activate_free_miner(current_user: Dict = Depends(get_current_user)):
 @app.post("/api/miners/watch-ad")
 async def activate_ad_miner(current_user: Dict = Depends(get_current_user)):
     """Activate ad miner (5 GH/s for 24 hours)"""
-    # Anti-spam: reject if the user's last ad view was less than 3 seconds ago
-    AD_COOLDOWN_SECONDS = 3
-    last_ad = transactions_collection.find_one(
-        {
-            "user_id": current_user["id"],
-            "$or": [
-                {"transaction_type": "ad_view"},
-                {"transaction_type": "ad_reward"}
-            ]
-        },
-        sort=[("created_at", -1)]
-    )
-    if last_ad and last_ad.get("created_at"):
-        elapsed = (datetime.utcnow() - last_ad["created_at"]).total_seconds()
-        if elapsed < AD_COOLDOWN_SECONDS:
-            warning_info = record_exploit_warning(current_user["id"])
-            if warning_info["banned"]:
-                raise HTTPException(
-                    status_code=403,
-                    detail={
-                        "banned": True,
-                        "message": "Your account has been permanently deactivated. Contact koalabtcmining@gmail.com to file an appeal.",
-                        "account_status": "Banned",
-                    },
-                )
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "exploit_detected": True,
-                    "warning_number": warning_info["warning_count"],
-                    "message": "Exploit attempt detected. Repeated violations will result in total account deactivation.",
-                },
-            )
-
     # Enforce the SAME daily reward limit as /api/ads/watch. Without this the
     # route is a second, unlimited path to the same mining reward.
     today = datetime.utcnow().date().isoformat()
@@ -1489,29 +1223,6 @@ async def redeem_referral_code(
     referrer = users_collection.find_one({"referral_code": code})
     if not referrer:
         raise HTTPException(status_code=400, detail="Invalid referral code. Please check and try again.")
-
-    # Anti-fraud: block self-referral spoofing via same device fingerprint
-    user_fp = user.get("device_fingerprint")
-    referrer_fp = referrer.get("device_fingerprint")
-    if user_fp and referrer_fp and user_fp == referrer_fp and str(referrer["_id"]) != str(user["_id"]):
-        warning_info = record_exploit_warning(str(user["_id"]))
-        if warning_info["banned"]:
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "banned": True,
-                    "message": "Your account has been permanently deactivated. Contact koalabtcmining@gmail.com to file an appeal.",
-                    "account_status": "Banned",
-                },
-            )
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "exploit_detected": True,
-                "warning_number": warning_info["warning_count"],
-                "message": "Exploit attempt detected. Repeated violations will result in total account deactivation.",
-            },
-        )
 
     # Atomically claim the redemption. The filter requires that no referrer is
     # set yet, so two concurrent requests cannot both be granted the reward.
@@ -2034,12 +1745,10 @@ async def request_withdrawal(
 ):
     """Submit a satoshi-denominated withdrawal request for admin review.
 
-    Deducts the requested amount plus a 1% service fee and a flat 5-sat
-    network fee from the user's balance atomically and records a pending
-    withdrawal in the withdrawals collection. Payout is handled out-of-band
-    by admin via Kraken after manual verification.
+    Deducts the requested amount from the user's balance atomically and records
+    a pending withdrawal in the withdrawals collection. Payout is handled
+    out-of-band by admin via Kraken after manual verification.
     """
-    import math
     SATOSHIS_PER_BTC = 100_000_000
     MIN_WITHDRAWAL_SATS = 1000
 
@@ -2062,47 +1771,35 @@ async def request_withdrawal(
             detail="Transaction blocked: Request fails to meet the required 1,000 Satoshi floor limit."
         )
 
-    service_fee = math.ceil(sats_amount * 0.01)
-    network_fee = 5
-    total_required_sats = sats_amount + service_fee + network_fee
-
     amount_btc = sats_amount / SATOSHIS_PER_BTC
-    service_fee_btc = service_fee / SATOSHIS_PER_BTC
-    network_fee_btc = network_fee / SATOSHIS_PER_BTC
-    total_deducted_btc = total_required_sats / SATOSHIS_PER_BTC
 
     user = users_collection.find_one({"_id": current_user["id"]})
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
 
     current_balance = user.get("bitcoin_balance", 0.0)
-    current_balance_sats = int(current_balance * SATOSHIS_PER_BTC)
-    if current_balance_sats < total_required_sats:
+    if amount_btc > current_balance:
         raise HTTPException(
             status_code=400,
-            detail="Inadequate balance to cover the withdrawal amount, 1% service fee, and network fees."
+            detail=f"Insufficient balance. Available: {current_balance:.8f} BTC ({int(current_balance * SATOSHIS_PER_BTC):,} sats)."
         )
 
     # Atomically claim funds: the balance condition is in the filter so two
     # concurrent requests cannot both succeed.
     claim = users_collection.update_one(
-        {"_id": current_user["id"], "bitcoin_balance": {"$gte": total_deducted_btc}},
-        {"$inc": {"bitcoin_balance": -total_deducted_btc, "total_cashed_out": amount_btc}},
+        {"_id": current_user["id"], "bitcoin_balance": {"$gte": amount_btc}},
+        {"$inc": {"bitcoin_balance": -amount_btc, "total_cashed_out": amount_btc}},
     )
     if claim.modified_count != 1:
-        raise HTTPException(status_code=400, detail="Inadequate balance to cover the withdrawal amount, 1% service fee, and network fees.")
+        raise HTTPException(status_code=400, detail="Insufficient balance for this withdrawal.")
 
     withdrawal_id = str(uuid.uuid4())
     withdrawal_record = {
         "_id": withdrawal_id,
         "user_id": current_user["id"],
         "bitcoin_address": address,
-        "requested_amount": sats_amount,
         "amount_sats": sats_amount,
         "amount_btc": amount_btc,
-        "service_fee": service_fee,
-        "network_fee": network_fee,
-        "total_deducted": total_required_sats,
         "network": "bitcoin",
         "status": "Pending Administrative Review",
         "transaction_hash": None,
@@ -2116,23 +1813,20 @@ async def request_withdrawal(
         "_id": str(uuid.uuid4()),
         "user_id": current_user["id"],
         "transaction_type": "withdrawal",
-        "amount": -total_deducted_btc,
-        "description": f"Withdrawal request: {sats_amount:,} sats (fee: {service_fee} sats + {network_fee} sats network) to {address[:10]}...{address[-6:]}",
+        "amount": -amount_btc,
+        "description": f"Withdrawal request: {sats_amount:,} sats to {address[:10]}...{address[-6:]}",
         "withdrawal_id": withdrawal_id,
         "created_at": datetime.utcnow(),
     })
 
-    new_balance = current_balance - total_deducted_btc
-    logger.info(f"Withdrawal request created: {sats_amount} sats + {service_fee} service + {network_fee} network = {total_required_sats} total to {address} (User: {current_user['id']})")
+    new_balance = current_balance - amount_btc
+    logger.info(f"Withdrawal request created: {sats_amount} sats to {address} (User: {current_user['id']})")
 
     return {
         "success": True,
         "withdrawal_id": withdrawal_id,
         "amount_sats": sats_amount,
         "amount_btc": amount_btc,
-        "service_fee": service_fee,
-        "network_fee": network_fee,
-        "total_deducted": total_required_sats,
         "new_balance_btc": new_balance,
         "status": "Pending Administrative Review",
         "message": "Withdrawal request submitted! Payout processing is subject to verification.",
@@ -3290,12 +2984,6 @@ async def verify_reset_password(request: Request):
 @app.post("/api/test/reset-account")
 async def reset_test_account(current_user: Dict = Depends(get_current_user)):
     """Reset test account - clear balance and miners for testing"""
-    # This wipes the caller's transaction, purchase and withdrawal history,
-    # which is the record an admin reviews when a payout is disputed. It is a
-    # development aid and must stay switched off unless deliberately enabled.
-    if os.getenv("ENABLE_TEST_ENDPOINTS", "").lower() not in ("1", "true", "yes"):
-        raise HTTPException(status_code=404, detail="Not found")
-
     try:
         user_id = current_user["id"]
         
@@ -3671,260 +3359,6 @@ async def capture_paypal_order(order_data: Dict[str, Any], current_user: Dict = 
     except Exception as e:
         logger.error(f"Error capturing PayPal order: {e}")
         raise HTTPException(status_code=500, detail="Failed to process payment")
-
-# ---------------------------------------------------------------------------
-# PayPal REST v2 (OAuth2) routes — used by the updated store checkout flow.
-# These hit PayPal's REST API directly with client-credentials OAuth2 instead
-# of the PayPal SDK, so they work without the paypalcheckoutsdk package.
-# ---------------------------------------------------------------------------
-
-def _paypal_base_url() -> str:
-    """Return PayPal API base URL based on live/sandbox env."""
-    if os.getenv("PAYPAL_MODE", "live").lower() == "sandbox":
-        return "https://api-m.sandbox.paypal.com"
-    return "https://api-m.paypal.com"
-
-async def _paypal_access_token() -> str:
-    """Fetch a live OAuth2 access token from PayPal."""
-    import aiohttp
-    client_id = os.getenv("PAYPAL_CLIENT_ID", "")
-    client_secret = os.getenv("PAYPAL_SECRET", "")
-    if not client_id or not client_secret:
-        raise HTTPException(
-            status_code=500,
-            detail="PayPal credentials are not configured on the server."
-        )
-    base = _paypal_base_url()
-    auth_url = f"{base}/v1/oauth2/token"
-    headers = {"Accept": "application/json", "Accept-Language": "en_US"}
-    data = {"grant_type": "client_credentials"}
-    async with aiohttp.ClientSession() as session:
-        async with session.post(auth_url, headers=headers, data=data, auth=aiohttp.BasicAuth(client_id, client_secret), timeout=aiohttp.ClientTimeout(total=15)) as resp:
-            if resp.status != 200:
-                body = await resp.text()
-                logger.error(f"PayPal OAuth2 token request failed ({resp.status}): {body}")
-                raise HTTPException(status_code=502, detail="Unable to authenticate with PayPal. Please try again.")
-            token_data = await resp.json()
-            return token_data["access_token"]
-
-@app.post("/api/payments/paypal/create-order")
-async def create_paypal_order_v2(order_data: Dict[str, Any], request: Request, current_user: Dict = Depends(get_current_user)):
-    """Create a PayPal order via REST v2 OAuth2 and store a Pending Checkout Capture record."""
-    try:
-        miner_id = order_data.get("miner_id")
-        tier = order_data.get("tier", "")
-        price = order_data.get("price")
-
-        # Resolve miner by ID from the shared STORE_MINERS list; fall back to
-        # the explicit tier/price the frontend sent.
-        # The price, name, hash rate and duration are always taken from the
-        # server-side catalogue. The client's "price" field is never trusted:
-        # accepting it would let a caller name their own amount for any tier,
-        # and a negative value would corrupt the purchase ledger.
-        miner = next((m for m in STORE_MINERS if m["id"] == miner_id), None)
-        if not miner:
-            raise HTTPException(status_code=400, detail="Unknown miner. Please pick a miner from the store.")
-
-        final_price = float(miner["price"])
-        miner_name = miner["name"]
-        hash_rate = miner["hash_rate"]
-        duration_days = miner["duration_days"]
-
-        access_token = await _paypal_access_token()
-        base = _paypal_base_url()
-
-        order_payload = {
-            "intent": "CAPTURE",
-            "purchase_units": [{
-                "reference_id": f"{miner_id or tier}_{current_user['id']}_{uuid.uuid4()}",
-                "description": f"{miner_name} - mining power for {duration_days} days",
-                "amount": {
-                    "currency_code": "USD",
-                    "value": f"{final_price:.2f}",
-                    "breakdown": {
-                        "item_total": {
-                            "currency_code": "USD",
-                            "value": f"{final_price:.2f}"
-                        }
-                    }
-                },
-                "items": [{
-                    "name": miner_name,
-                    "unit_amount": {
-                        "currency_code": "USD",
-                        "value": f"{final_price:.2f}"
-                    },
-                    "quantity": "1",
-                    "category": "DIGITAL_GOODS"
-                }]
-            }],
-            "application_context": {
-                "brand_name": "Koala Mining",
-                "landing_page": "BILLING",
-                "user_action": "PAY_NOW",
-                "return_url": f"{_public_base_url(request)}/api/payments/paypal-return",
-                "cancel_url": f"{_public_base_url(request)}/api/payments/paypal-cancel"
-            }
-        }
-
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {access_token}",
-        }
-
-        import aiohttp
-        async with aiohttp.ClientSession() as session:
-            async with session.post(f"{base}/v2/checkout/orders", headers=headers, json=order_payload, timeout=aiohttp.ClientTimeout(total=20)) as resp:
-                if resp.status not in (200, 201):
-                    body = await resp.text()
-                    logger.error(f"PayPal create-order failed ({resp.status}): {body}")
-                    raise HTTPException(status_code=502, detail=f"PayPal could not create the order. Please try again.")
-                result = await resp.json()
-
-        order_id = result.get("id")
-        if not order_id:
-            raise HTTPException(status_code=502, detail="PayPal did not return an order ID.")
-
-        # Extract the approve (approval_url) link
-        approve_link = None
-        for link in result.get("links", []):
-            if link.get("rel") == "approve":
-                approve_link = link.get("href")
-                break
-
-        # Store tracking record as "Pending Checkout Capture"
-        order_info = {
-            "_id": order_id,
-            "user_id": current_user["id"],
-            "miner_id": miner_id,
-            "tier": tier,
-            "miner_data": miner if miner else {"name": miner_name, "hash_rate": hash_rate, "duration_days": duration_days, "price": final_price, "id": miner_id or tier},
-            "final_price": final_price,
-            "status": "Pending Checkout Capture",
-            "created_at": datetime.utcnow(),
-        }
-        db.paypal_orders.insert_one(order_info)
-
-        return {
-            "order_id": order_id,
-            "approval_url": approve_link,
-            "links": result.get("links", []),
-            "miner_name": miner_name,
-            "final_price": final_price,
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error creating PayPal order (v2): {e}")
-        raise HTTPException(status_code=500, detail="Failed to create PayPal order. Please try again.")
-
-@app.post("/api/payments/paypal/capture-order")
-async def capture_paypal_order_v2(order_data: Dict[str, Any], current_user: Dict = Depends(get_current_user)):
-    """Capture a PayPal order created via the REST v2 flow and activate the miner."""
-    try:
-        order_id = order_data.get("order_id")
-        if not order_id:
-            raise HTTPException(status_code=400, detail="Order ID is required.")
-
-        stored_order = db.paypal_orders.find_one({"_id": order_id})
-        if not stored_order or stored_order["user_id"] != current_user["id"]:
-            raise HTTPException(status_code=404, detail="Order not found.")
-
-        if stored_order.get("status") == "completed":
-            raise HTTPException(status_code=400, detail="This order has already been processed.")
-
-        access_token = await _paypal_access_token()
-        base = _paypal_base_url()
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {access_token}",
-        }
-
-        import aiohttp
-        async with aiohttp.ClientSession() as session:
-            async with session.post(f"{base}/v2/checkout/orders/{order_id}/capture", headers=headers, timeout=aiohttp.ClientTimeout(total=20)) as resp:
-                if resp.status not in (200, 201):
-                    body = await resp.text()
-                    logger.error(f"PayPal capture failed ({resp.status}): {body}")
-                    raise HTTPException(status_code=400, detail="PayPal payment capture failed. Please contact support.")
-                result = await resp.json()
-
-        if result.get("status") != "COMPLETED":
-            raise HTTPException(status_code=400, detail="Payment was not completed. Please try again.")
-
-        miner_data = stored_order["miner_data"]
-        new_miner = {
-            "_id": str(uuid.uuid4()),
-            "user_id": current_user["id"],
-            "name": miner_data["name"],
-            "hash_rate": miner_data["hash_rate"],
-            "miner_type": "premium",
-            "status": "active",
-            "duration_hours": miner_data["duration_days"] * 24,
-            "time_remaining": miner_data["duration_days"] * 24,
-            "total_earned": 0.0,
-            "purchase_price": stored_order["final_price"],
-            "payment_method": "paypal",
-            "payment_id": order_id,
-            "activated_at": datetime.utcnow(),
-            "expires_at": datetime.utcnow() + timedelta(days=miner_data["duration_days"]),
-            "created_at": datetime.utcnow()
-        }
-        miners_collection.insert_one(new_miner)
-
-        db.paypal_orders.update_one(
-            {"_id": order_id},
-            {"$set": {
-                "status": "completed",
-                "captured_at": datetime.utcnow(),
-                "miner_id": new_miner["_id"],
-                "payment_details": result,
-            }}
-        )
-
-        transactions_collection.insert_one({
-            "_id": str(uuid.uuid4()),
-            "user_id": current_user["id"],
-            "transaction_type": "miner_purchase",
-            "amount": stored_order["final_price"],
-            "currency": "USD",
-            "payment_method": "paypal",
-            "payment_id": order_id,
-            "miner_id": new_miner["_id"],
-            "miner_name": miner_data["name"],
-            "description": f"Purchased {miner_data['name']} via PayPal",
-            "created_at": datetime.utcnow()
-        })
-
-        purchases_collection.insert_one({
-            "_id": str(uuid.uuid4()),
-            "user_id": current_user["id"],
-            "miner_id": new_miner["_id"],
-            "miner_name": miner_data["name"],
-            "amount": stored_order["final_price"],
-            "payment_method": "paypal",
-            "payment_id": order_id,
-            "created_at": datetime.utcnow()
-        })
-
-        return {
-            "success": True,
-            "message": "Payment completed and miner activated!",
-            "miner_id": new_miner["_id"],
-            "miner_name": miner_data["name"],
-            "hash_rate": miner_data["hash_rate"],
-            "duration_days": miner_data["duration_days"],
-            "amount_paid": stored_order["final_price"],
-            "payment_id": order_id,
-            "expires_at": new_miner["expires_at"].isoformat()
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error capturing PayPal order (v2): {e}")
-        raise HTTPException(status_code=500, detail="Failed to process payment. Please contact support.")
 
 @app.get("/api/payments/paypal-return")
 async def paypal_return_handler(token: str = None, PayerID: str = None):
@@ -4626,110 +4060,35 @@ async def watch_ad(
     """Process ad watch - only reward for miner_activation type"""
     try:
         ad_type = ad_data.get("ad_type")  # 'app_launch', 'miner_activation', 'withdrawal'
-
-        # SECURITY (manual follow-up): the reward below is granted on the
-        # client's unverified claim that an ad was watched. Closing this needs
-        # AdMob Server-Side Verification turned on for the rewarded ad units in
-        # the Google AdMob console, and the SSV callback secret provisioned to
-        # this service, so the reward can be keyed to a signed callback from
-        # Google instead of this request body. Until then the daily cap below
-        # is the only thing bounding the abuse.
-
+        
         # Validate ad type
         valid_ad_types = ['app_launch', 'miner_activation', 'withdrawal']
         if ad_type not in valid_ad_types:
             raise HTTPException(status_code=400, detail="Invalid ad type")
-
-        # Anti-spam: reject if the user's last ad view was less than 3 seconds ago
-        AD_COOLDOWN_SECONDS = 3
-        last_ad = transactions_collection.find_one(
-            {
-                "user_id": current_user["id"],
-                "$or": [
-                    {"transaction_type": "ad_view"},
-                    {"transaction_type": "ad_reward"}
-                ]
-            },
-            sort=[("created_at", -1)]
-        )
-        if last_ad and last_ad.get("created_at"):
-            elapsed = (datetime.utcnow() - last_ad["created_at"]).total_seconds()
-            if elapsed < AD_COOLDOWN_SECONDS:
-                warning_info = record_exploit_warning(current_user["id"])
-                if warning_info["banned"]:
-                    raise HTTPException(
-                        status_code=403,
-                        detail={
-                            "banned": True,
-                            "message": "Your account has been permanently deactivated. Contact koalabtcmining@gmail.com to file an appeal.",
-                            "account_status": "Banned",
-                        },
-                    )
-                raise HTTPException(
-                    status_code=403,
-                    detail={
-                        "exploit_detected": True,
-                        "warning_number": warning_info["warning_count"],
-                        "message": "Exploit attempt detected. Repeated violations will result in total account deactivation.",
-                    },
-                )
         
-        # Check daily limit.
+        # Check daily limit
         today = datetime.utcnow().date()
-
-        if ad_type == 'miner_activation':
-            # Rewarded ad: claim the daily slot atomically BEFORE granting
-            # anything. Make sure today's counter row exists first (the unique
-            # index on user_id+date makes this safe under concurrency), then
-            # claim with the "under the cap" condition inside the update filter
-            # so two concurrent requests cannot both take the same slot.
-            try:
-                db.daily_ad_counters.update_one(
-                    {"user_id": current_user["id"], "date": today.isoformat()},
-                    {"$setOnInsert": {
-                        "ads_watched": 0,
-                        "last_reset": datetime.utcnow(),
-                        "created_at": datetime.utcnow(),
-                    }},
-                    upsert=True,
-                )
-            except DuplicateKeyError:
-                # A concurrent request created it first; that is the desired state.
-                pass
-
-            claimed = db.daily_ad_counters.find_one_and_update(
-                {
-                    "user_id": current_user["id"],
-                    "date": today.isoformat(),
-                    "ads_watched": {"$lt": MAX_DAILY_ADS},
-                },
-                {
-                    "$inc": {"ads_watched": 1},
-                    "$set": {"updated_at": datetime.utcnow()},
-                },
-                return_document=ReturnDocument.AFTER,
-            )
-            if claimed is None:
-                raise HTTPException(
-                    status_code=429,
-                    detail=f"Daily ad limit reached ({MAX_DAILY_ADS}/day). Try again tomorrow."
-                )
-            # Count before this claim, which is what the response fields below
-            # are expressed in terms of.
-            ads_watched = max(0, claimed.get("ads_watched", 1) - 1)
-        else:
-            # Non-rewarded ad: nothing is granted and the counter is not
-            # consumed, so a plain read is enough.
-            daily_counter = db.daily_ad_counters.find_one({
+        daily_counter = db.daily_ad_counters.find_one({
+            "user_id": current_user["id"],
+            "date": today.isoformat()
+        })
+        
+        if not daily_counter:
+            daily_counter = {
                 "user_id": current_user["id"],
-                "date": today.isoformat()
-            }) or {}
-            ads_watched = daily_counter.get("ads_watched", 0)
-            if ads_watched >= MAX_DAILY_ADS:
-                raise HTTPException(
-                    status_code=429,
-                    detail=f"Daily ad limit reached ({MAX_DAILY_ADS}/day). Try again tomorrow."
-                )
+                "date": today.isoformat(),
+                "ads_watched": 0,
+                "last_reset": datetime.utcnow(),
+                "created_at": datetime.utcnow()
+            }
+            db.daily_ad_counters.insert_one(daily_counter)
+        
+        ads_watched = daily_counter.get("ads_watched", 0)
+        if ads_watched >= MAX_DAILY_ADS:
+            raise HTTPException(
+                status_code=429, 
+                detail=f"Daily ad limit reached ({MAX_DAILY_ADS}/day). Try again tomorrow."
+            )
         
         # Only create ad miner for miner_activation type (rewarded ad)
         ad_miner = None
@@ -4759,9 +4118,13 @@ async def watch_ad(
             
             miners_collection.insert_one(ad_miner)
         
-        # The daily counter for rewarded ads was already claimed atomically at
-        # the top of this handler, so it must not be incremented a second time.
+        # Update daily counter ONLY for rewarded ads (miner_activation)
         if ad_type == 'miner_activation':
+            db.daily_ad_counters.update_one(
+                {"user_id": current_user["id"], "date": today.isoformat()},
+                {"$inc": {"ads_watched": 1}, "$set": {"updated_at": datetime.utcnow()}}
+            )
+            # Get updated stats after increment
             new_ads_watched = ads_watched + 1
         else:
             # For non-rewarded ads (app_launch, withdrawal), don't increment counter
@@ -4960,10 +4323,8 @@ if _admin_user and "role" not in _admin_user:
     users_collection.update_one({"_id": _admin_user["_id"]}, {"$set": {"role": "admin"}})
 
 def is_admin(current_user: Dict) -> bool:
-    """Check if current user is admin via database role field or admin email."""
-    if current_user.get("role") == "admin":
-        return True
-    return current_user.get("email", "").lower() == ADMIN_EMAIL.lower()
+    """Check if current user is admin via database role field."""
+    return current_user.get("role") == "admin"
 
 @app.get("/api/admin/check")
 async def check_admin_access(current_user: Dict = Depends(get_current_user)):
@@ -5068,7 +4429,7 @@ async def get_admin_stats(
         logger.error(f"Error details: {str(e)}")
         import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail="Failed to retrieve statistics")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve statistics: {str(e)}")
 
 @app.get("/api/admin/users")
 async def get_all_users(current_user: Dict = Depends(get_current_user)):
@@ -5081,44 +4442,22 @@ async def get_all_users(current_user: Dict = Depends(get_current_user)):
         users_cursor = users_collection.find({})
         users_list = list(users_cursor)
         
-        now = datetime.utcnow()
-
-        # Batch-fetch active miner counts and projected future earnings per user
-        miner_pipeline = [
-            {"$match": {"status": "active", "expires_at": {"$gt": now}}},
-            {"$group": {
-                "_id": "$user_id",
-                "count": {"$sum": 1},
-                "miners": {"$push": {"hash_rate": "$hash_rate", "expires_at": "$expires_at"}}
-            }}
+        # Batch-fetch active miner counts for all users in a single query
+        miner_counts_pipeline = [
+            {"$match": {"status": "active", "expires_at": {"$gt": datetime.utcnow()}}},
+            {"$group": {"_id": "$user_id", "count": {"$sum": 1}}}
         ]
-        miner_agg = {doc["_id"]: doc for doc in miners_collection.aggregate(miner_pipeline)}
+        miner_counts = {doc["_id"]: doc["count"] for doc in miners_collection.aggregate(miner_counts_pipeline)}
         
         for user in users_list:
-            user_id_str = str(user["_id"])
-            agg = miner_agg.get(user_id_str, {})
-            active_miners_count = agg.get("count", 0)
-            
-            # Calculate projected future earnings (in sats) from all active miners
-            expected_sats = 0
-            for miner in agg.get("miners", []):
-                expires_at = miner.get("expires_at")
-                if expires_at and expires_at > now:
-                    remaining_hours = (expires_at - now).total_seconds() / 3600
-                    hash_rate = miner.get("hash_rate", 0)
-                    # 1 GH/s = 1 sat per 24h => sats = hash_rate * remaining_hours / 24
-                    expected_sats += int(hash_rate * remaining_hours / 24)
-            
-            balance_btc = user.get("bitcoin_balance", 0.0)
-            balance_sats = int(balance_btc * 100_000_000)
+            # Active miners for this user (from pre-fetched counts)
+            active_miners_count = miner_counts.get(str(user["_id"]), 0)
             
             users.append({
-                "id": user_id_str,
+                "id": str(user["_id"]),
                 "name": user.get("name", ""),
                 "email": user.get("email", ""),
-                "balance": balance_btc,
-                "balance_sats": balance_sats,
-                "expected_sats": expected_sats,
+                "balance": user.get("bitcoin_balance", 0.0),
                 "active_miners": active_miners_count,
                 "btc_wallet_address": user.get("btc_wallet_address", ""),
                 "wallet_status": user.get("wallet_status", ""),
@@ -5132,118 +4471,6 @@ async def get_all_users(current_user: Dict = Depends(get_current_user)):
     except Exception as e:
         logger.error(f"Error getting users: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve users")
-
-@app.get("/api/admin/metrics")
-async def get_admin_metrics(current_user: Dict = Depends(get_current_user)):
-    """Get live liability metrics: outstanding sats and projected total debt sats."""
-    try:
-        if not is_admin(current_user):
-            raise HTTPException(status_code=403, detail="Admin access required")
-        
-        now = datetime.utcnow()
-        SATOSHIS_PER_BTC = 100_000_000
-
-        # Sum all current user balances (outstanding liability)
-        all_users = list(users_collection.find({}, {"bitcoin_balance": 1}))
-        total_outstanding_sats = 0
-        for u in all_users:
-            total_outstanding_sats += int(u.get("bitcoin_balance", 0.0) * SATOSHIS_PER_BTC)
-
-        # Sum projected future earnings from all active miners
-        active_miners_list = list(miners_collection.find(
-            {"status": "active", "expires_at": {"$gt": now}},
-            {"hash_rate": 1, "expires_at": 1}
-        ).limit(50000))
-
-        total_future_earnings_sats = 0
-        active_miners_count = len(active_miners_list)
-        for miner in active_miners_list:
-            expires_at = miner.get("expires_at")
-            if expires_at and expires_at > now:
-                remaining_hours = (expires_at - now).total_seconds() / 3600
-                hash_rate = miner.get("hash_rate", 0)
-                total_future_earnings_sats += int(hash_rate * remaining_hours / 24)
-
-        projected_total_debt_sats = total_outstanding_sats + total_future_earnings_sats
-        total_users = len(all_users)
-
-        return {
-            "total_outstanding_sats": total_outstanding_sats,
-            "projected_total_debt_sats": projected_total_debt_sats,
-            "total_users": total_users,
-            "active_miners": active_miners_count,
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting admin metrics: {e}")
-        raise HTTPException(status_code=500, detail="Failed to retrieve metrics")
-
-@app.post("/api/admin/edit-balance/{user_id}")
-async def admin_edit_balance(user_id: str, body: Dict, current_user: Dict = Depends(get_current_user)):
-    """Add to, subtract from, or set any target user's satoshi balance directly."""
-    try:
-        if not is_admin(current_user):
-            raise HTTPException(status_code=403, detail="Admin access required")
-        
-        operation = (body.get("operation") or "add").lower()
-        if operation not in ("add", "remove", "set"):
-            raise HTTPException(status_code=400, detail="Invalid operation. Must be add, remove, or set.")
-        
-        amount_sats = float(body.get("amount", 0))
-        if amount_sats < 0:
-            raise HTTPException(status_code=400, detail="Amount cannot be negative.")
-        if operation in ("add", "remove") and amount_sats <= 0:
-            raise HTTPException(status_code=400, detail="Amount must be greater than 0 for add/remove.")
-        
-        SATOSHIS_PER_BTC = 100_000_000
-        amount_btc = amount_sats / SATOSHIS_PER_BTC
-
-        # Resolve user by string ID first, then ObjectId
-        user = users_collection.find_one({"_id": user_id})
-        query_id = user_id
-        if not user:
-            try:
-                from bson import ObjectId
-                user = users_collection.find_one({"_id": ObjectId(user_id)})
-                if user:
-                    query_id = ObjectId(user_id)
-            except Exception:
-                pass
-        
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found.")
-        
-        current_balance = float(user.get("bitcoin_balance", 0.0) or 0)
-        if operation == "add":
-            new_balance = current_balance + amount_btc
-        elif operation == "remove":
-            new_balance = max(0.0, current_balance - amount_btc)
-        else:  # set
-            new_balance = amount_btc
-        
-        users_collection.update_one(
-            {"_id": query_id},
-            {"$set": {"bitcoin_balance": new_balance}}
-        )
-        
-        logger.info(f"Admin {operation} {amount_sats} sats for {user.get('email')}: {current_balance} -> {new_balance} BTC")
-        
-        verb = {"add": "Added", "remove": "Removed", "set": "Set"}[operation]
-        return {
-            "success": True,
-            "operation": operation,
-            "message": f"{verb} {int(amount_sats):,} sats for {user.get('email')}",
-            "new_balance": new_balance,
-            "new_balance_sats": int(new_balance * SATOSHIS_PER_BTC),
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error editing balance: {e}")
-        raise HTTPException(status_code=500, detail="Failed to update balance.")
 
 @app.post("/api/admin/reset-user/{user_id}")
 async def reset_user_account(user_id: str, current_user: Dict = Depends(get_current_user)):

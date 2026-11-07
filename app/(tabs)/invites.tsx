@@ -125,7 +125,7 @@ export default function Invites() {
       } else {
         Alert.alert('Error', res.data?.detail || 'Failed to redeem referral code');
       }
-    } catch {
+    } catch (error) {
       Alert.alert('Error', 'Network error occurred');
     } finally {
       setRedeemingCode(false);
@@ -159,7 +159,7 @@ export default function Invites() {
           <View style={styles.redeemCard}>
             <Text style={styles.cardTitle}>Have a Referral Code?</Text>
             <Text style={styles.redeemDescription}>
-              Redeem a friend&apos;s code to get a 25 GH/s bonus miner for 30 days!
+              Redeem a friend's code to get a 25 GH/s bonus miner for 30 days!
             </Text>
             <View style={styles.redeemRow}>
               <TextInput
@@ -221,7 +221,7 @@ export default function Invites() {
             <View style={styles.rewardText}>
               <Text style={styles.rewardTitle}>Purchase Commission</Text>
               <Text style={styles.rewardDescription}>
-                Earn 10% of your friend&apos;s mining hash rate when they buy premium miners
+                Earn 10% of your friend's mining hash rate when they buy premium miners
               </Text>
             </View>
           </View>

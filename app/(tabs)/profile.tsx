@@ -47,20 +47,9 @@ export default function Profile() {
   const loadUserProfile = async () => {
     try {
       const res = await apiFetch('/api/auth/me');
-      if (res.ok && res.data && typeof res.data === 'object' && res.data.id) {
-        const d = res.data;
-        setUserProfile({
-          id: d.id ?? '',
-          name: d.name ?? '',
-          email: d.email ?? '',
-          referral_code: d.referral_code ?? '',
-          bitcoin_balance: typeof d.bitcoin_balance === 'number' ? d.bitcoin_balance : 0,
-          total_earnings: typeof d.total_earnings === 'number' ? d.total_earnings : 0,
-          total_referral_rewards: typeof d.total_referral_rewards === 'number' ? d.total_referral_rewards : 0,
-          created_at: d.created_at ?? '',
-          avatar_url: d.avatar_url ?? undefined,
-        });
-      } else if (res.status === 401 || res.status === 403) {
+      if (res.ok) {
+        setUserProfile(res.data);
+      } else {
         await clearSession();
         router.replace('/auth');
       }
@@ -118,7 +107,7 @@ export default function Profile() {
       if (!result.canceled && result.assets[0]) {
         await uploadAvatar(result.assets[0]);
       }
-    } catch {
+    } catch (error) {
       Alert.alert('Error', 'Could not select image');
     }
   };
@@ -138,7 +127,7 @@ export default function Profile() {
       } else {
         Alert.alert('Error', res.data?.detail || 'Failed to upload avatar');
       }
-    } catch {
+    } catch (error) {
       Alert.alert('Error', 'Network error occurred');
     } finally {
       setUploadingAvatar(false);
@@ -152,7 +141,7 @@ export default function Profile() {
         Alert.alert('Success', 'Avatar removed');
         loadUserProfile();
       }
-    } catch {
+    } catch (error) {
       Alert.alert('Error', 'Network error occurred');
     }
   };
@@ -273,20 +262,6 @@ export default function Profile() {
         </View>
 
 
-
-        {/* Admin Panel Entry — visible only to the admin account */}
-        {userProfile?.email === 'colourfulkoaladevelopment@gmail.com' && (
-          <View style={styles.adminButtonContainer}>
-            <TouchableOpacity
-              style={styles.adminButton}
-              onPress={() => router.push('/admin')}
-            >
-              <Ionicons name="shield-checkmark" size={20} color="#FFF" />
-              <Text style={styles.adminButtonText}>Admin Panel</Text>
-              <Ionicons name="chevron-forward" size={20} color="#FFF" style={{ marginLeft: 'auto' }} />
-            </TouchableOpacity>
-          </View>
-        )}
 
         {/* Actions Card */}
         <View style={styles.actionsCard}>
@@ -445,9 +420,6 @@ const styles = StyleSheet.create({
   signOutButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: '#FF5722', paddingVertical: 16, paddingHorizontal: 20, borderRadius: 12 },
   disabledButton: { backgroundColor: '#666' },
   signOutText: { color: '#FFF', fontSize: 16, fontWeight: 'bold', marginLeft: 10 },
-  adminButtonContainer: { marginHorizontal: 15, marginBottom: 15 },
-  adminButton: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#1B4332', paddingVertical: 16, paddingHorizontal: 20, borderRadius: 12, borderWidth: 1, borderColor: '#4CAF50' },
-  adminButtonText: { color: '#FFF', fontSize: 16, fontWeight: 'bold', marginLeft: 10 },
   footer: { alignItems: 'center', paddingVertical: 20, paddingHorizontal: 40 },
   footerText: { fontSize: 12, color: '#666', textAlign: 'center', lineHeight: 18 },
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.85)', justifyContent: 'center', alignItems: 'center', paddingHorizontal: 30 },

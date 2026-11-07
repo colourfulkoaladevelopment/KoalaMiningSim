@@ -9,7 +9,7 @@ export default function PaypalCancel() {
     (async () => {
       try {
         await AsyncStorage.setItem('paypal_payment_result', 'cancel');
-      } catch {}
+      } catch (e) {}
       router.replace('/');
     })();
   }, []);
