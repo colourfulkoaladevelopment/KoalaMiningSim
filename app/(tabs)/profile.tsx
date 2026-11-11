@@ -39,6 +39,7 @@ export default function Profile() {
   const [contactForm, setContactForm] = useState({ name: '', email: '', subject: '', message: '' });
   const [suggestForm, setSuggestForm] = useState({ name: '', email: '', feature: '', description: '' });
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
 
   useEffect(() => {
     loadUserProfile();
@@ -46,7 +47,11 @@ export default function Profile() {
 
   const loadUserProfile = async () => {
     try {
-      const res = await apiFetch('/api/auth/me');
+      const [res, adminRes] = await Promise.all([
+        apiFetch('/api/auth/me'),
+        apiFetch('/api/admin/check'),
+      ]);
+      setIsAdmin(adminRes.ok);
       if (res.ok) {
         setUserProfile(res.data);
       } else {
@@ -298,6 +303,22 @@ export default function Profile() {
           </TouchableOpacity>
 
         </View>
+
+        {isAdmin ? (
+          <View style={styles.actionsCard}>
+            <Text style={styles.cardTitle}>Administration</Text>
+            <TouchableOpacity style={styles.actionItem} onPress={() => router.push('/admin')}>
+              <View style={styles.actionIcon}>
+                <Ionicons name="shield-checkmark" size={24} color="#FF9800" />
+              </View>
+              <View style={styles.actionText}>
+                <Text style={styles.actionTitle}>Admin Console</Text>
+                <Text style={styles.actionDescription}>Review users, wallets, and balances</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={20} color="#AAA" />
+            </TouchableOpacity>
+          </View>
+        ) : null}
 
         {/* App Info */}
         <View style={styles.infoCard}>
